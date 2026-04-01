@@ -113,10 +113,16 @@ def main():
     accuracy = (true_labels == pred_labels).mean()
     print(f"\nOverall Accuracy: {accuracy:.4f}")
 
-    print("\nClassification Report:")
+    print("\nClassification Report (precision / recall / F1 per class):")
     print(classification_report(true_labels, pred_labels, target_names=class_names))
 
+    # Per-class accuracy
+    print("Per-Class Accuracy:")
     cm = confusion_matrix(true_labels, pred_labels)
+    per_class_acc = cm.diagonal() / cm.sum(axis=1)
+    for cls_name, cls_acc in zip(class_names, per_class_acc):
+        print(f"  {cls_name:<30s} {cls_acc:.4f}")
+
     plot_confusion_matrix(cm, class_names, save_path="confusion_matrix.png")
 
 
