@@ -36,23 +36,30 @@ class SmartMineResNet18(nn.Module):
 class SmartMineResNet101(nn.Module):
     """ResNet-101 with a custom classification head for mine-safety detection.
 
-    Pretrained ImageNet weights are used for transfer learning. All layers
-    except ``layer3``, ``layer4``, and the custom ``fc`` head are frozen.
+    Pretrained ImageNet weights are used for transfer learning. By default
+    ``layer2``, ``layer3``, ``layer4``, and the custom ``fc`` head are trained;
+    ``layer1`` can optionally be unfrozen for finer mineral-specific features.
 
     Args:
         num_classes: Number of output classes (default: 4).
+        unfreeze_layer1: When ``True``, ``layer1`` is also unfrozen so that
+            low-level texture features can be fine-tuned for mineral images.
     """
 
-    def __init__(self, num_classes: int = 4) -> None:
+    def __init__(self, num_classes: int = 4, unfreeze_layer1: bool = False) -> None:
         super().__init__()
         self.num_classes = num_classes
+        self._unfreeze_layer1 = unfreeze_layer1
 
         # Load pretrained backbone
         backbone = models.resnet101(weights=models.ResNet101_Weights.IMAGENET1K_V1)
 
-        # Freeze early layers; unfreeze layer2, layer3, layer4 for mineral-specific features
+        # Freeze all layers first, then selectively unfreeze for fine-tuning
         for param in backbone.parameters():
             param.requires_grad = False
+        if unfreeze_layer1:
+            for param in backbone.layer1.parameters():
+                param.requires_grad = True
         for param in backbone.layer2.parameters():
             param.requires_grad = True
         for param in backbone.layer3.parameters():
@@ -71,11 +78,18 @@ class SmartMineResNet101(nn.Module):
         self.layer4 = backbone.layer4
         self.avgpool = backbone.avgpool
 
-        # Custom classification head: 2048 -> 512 -> num_classes
+        # Custom classification head: 2048 -> 1024 -> 512 -> num_classes
+        # BatchNorm and reduced dropout (0.25) for more stable training and
+        # better feature flow compared to the original 2048->512 head.
         self.fc = nn.Sequential(
-            nn.Linear(2048, 512),
+            nn.Linear(2048, 1024),
+            nn.BatchNorm1d(1024),
             nn.ReLU(inplace=True),
-            nn.Dropout(p=0.4),
+            nn.Dropout(p=0.25),
+            nn.Linear(1024, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=0.25),
             nn.Linear(512, num_classes),
         )
 
@@ -96,25 +110,33 @@ class SmartMineResNet101(nn.Module):
         return x
 
     def __repr__(self) -> str:  # noqa: D105
+        unfrozen = "layer1+layer2+layer3+layer4" if self._unfreeze_layer1 else "layer2+layer3+layer4"
         return (
             f"SmartMineResNet101(\n"
-            f"  backbone=ResNet-101 (pretrained, layer2+layer3+layer4 unfrozen)\n"
-            f"  fc=Linear(2048->512)->ReLU->Dropout(0.4)->Linear(512->{self.num_classes})\n"
+            f"  backbone=ResNet-101 (pretrained, {unfrozen} unfrozen)\n"
+            f"  fc=Linear(2048->1024)->BN->ReLU->Dropout(0.25)"
+            f"->Linear(1024->512)->BN->ReLU->Dropout(0.25)->Linear(512->{self.num_classes})\n"
             f"  num_classes={self.num_classes}\n"
             f")"
         )
 
 
-def get_model(num_classes: int = 4, device: str = "cpu") -> SmartMineResNet101:
+def get_model(
+    num_classes: int = 4,
+    device: str = "cpu",
+    unfreeze_layer1: bool = False,
+) -> SmartMineResNet101:
     """Factory function that returns a ``SmartMineResNet101`` on *device*.
 
     Args:
         num_classes: Number of output classes.
         device: PyTorch device string, e.g. ``"cuda"`` or ``"cpu"``.
+        unfreeze_layer1: When ``True``, ``layer1`` is also unfrozen during
+            fine-tuning to capture mineral-specific low-level features.
 
     Returns:
         Model moved to the requested device.
     """
-    model = SmartMineResNet101(num_classes=num_classes)
+    model = SmartMineResNet101(num_classes=num_classes, unfreeze_layer1=unfreeze_layer1)
     model = model.to(device)
     return model
