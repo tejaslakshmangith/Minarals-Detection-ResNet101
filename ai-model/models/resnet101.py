@@ -5,6 +5,34 @@ import torch.nn as nn
 import torchvision.models as models
 
 
+class DropPath(nn.Module):
+    """Stochastic Depth (DropPath) regularisation.
+
+    During training each sample is independently dropped (replaced by a
+    zero tensor) with probability *drop_prob*.  At test time the full
+    residual is passed through unchanged.
+
+    Args:
+        drop_prob: Probability of dropping the residual branch (default: 0.0).
+    """
+
+    def __init__(self, drop_prob: float = 0.0) -> None:
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.training or self.drop_prob == 0.0:
+            return x
+        keep_prob = 1.0 - self.drop_prob
+        # Shape: (batch, 1, 1, 1) so the same mask is applied to all spatial positions.
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        random_tensor = (torch.rand(shape, dtype=x.dtype, device=x.device) < keep_prob).to(x.dtype)
+        return x * random_tensor / keep_prob
+
+    def extra_repr(self) -> str:
+        return f"drop_prob={self.drop_prob}"
+
+
 class SmartMineResNet18(nn.Module):
     """ResNet-18 - 5x faster than ResNet-101, same interface."""
     def __init__(self, num_classes: int = 4):
@@ -37,13 +65,16 @@ class SmartMineResNet101(nn.Module):
     """ResNet-101 with a custom classification head for mine-safety detection.
 
     Pretrained ImageNet weights are used for transfer learning. All layers
-    except ``layer3``, ``layer4``, and the custom ``fc`` head are frozen.
+    except ``layer2``, ``layer3``, ``layer4``, and the custom ``fc`` head
+    are frozen by default (controllable via ``llrd`` parameter).
 
     Args:
         num_classes: Number of output classes (default: 4).
+        drop_path_rate: Stochastic Depth drop probability applied after the
+            backbone's spatial feature extraction (default: 0.1).
     """
 
-    def __init__(self, num_classes: int = 4) -> None:
+    def __init__(self, num_classes: int = 4, drop_path_rate: float = 0.1) -> None:
         super().__init__()
         self.num_classes = num_classes
 
@@ -71,6 +102,9 @@ class SmartMineResNet101(nn.Module):
         self.layer4 = backbone.layer4
         self.avgpool = backbone.avgpool
 
+        # Stochastic Depth applied to the feature map before the head
+        self.drop_path = DropPath(drop_prob=drop_path_rate)
+
         # Custom classification head: 2048 -> 512 -> num_classes
         self.fc = nn.Sequential(
             nn.Linear(2048, 512),
@@ -92,6 +126,8 @@ class SmartMineResNet101(nn.Module):
 
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
+        # Apply stochastic depth to the flattened feature vector
+        x = self.drop_path(x)
         x = self.fc(x)
         return x
 
@@ -99,22 +135,28 @@ class SmartMineResNet101(nn.Module):
         return (
             f"SmartMineResNet101(\n"
             f"  backbone=ResNet-101 (pretrained, layer2+layer3+layer4 unfrozen)\n"
+            f"  drop_path={self.drop_path.drop_prob}\n"
             f"  fc=Linear(2048->512)->ReLU->Dropout(0.4)->Linear(512->{self.num_classes})\n"
             f"  num_classes={self.num_classes}\n"
             f")"
         )
 
 
-def get_model(num_classes: int = 4, device: str = "cpu") -> SmartMineResNet101:
+def get_model(
+    num_classes: int = 4,
+    device: str = "cpu",
+    drop_path_rate: float = 0.1,
+) -> SmartMineResNet101:
     """Factory function that returns a ``SmartMineResNet101`` on *device*.
 
     Args:
         num_classes: Number of output classes.
         device: PyTorch device string, e.g. ``"cuda"`` or ``"cpu"``.
+        drop_path_rate: Stochastic Depth drop probability (default: 0.1).
 
     Returns:
         Model moved to the requested device.
     """
-    model = SmartMineResNet101(num_classes=num_classes)
+    model = SmartMineResNet101(num_classes=num_classes, drop_path_rate=drop_path_rate)
     model = model.to(device)
     return model
